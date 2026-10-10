@@ -56,7 +56,11 @@ func (s *cancelAfterSteerRecorder) Steer(
 }
 
 func newSteerRecorder() *steerRecorder {
-	return &steerRecorder{fakeConversation: newFakeConversation()}
+	conv := newFakeConversation()
+	caps := productionCaps()
+	caps[ports.ChatCapabilitySteer] = true
+	conv.setCapabilities(caps)
+	return &steerRecorder{fakeConversation: conv}
 }
 
 func (s *steerRecorder) Steer(
@@ -756,6 +760,36 @@ func TestSteerIsRefusedWhenTheDriverCannotDoIt(t *testing.T) {
 	}
 	if calls := restartedProvider.steers(); len(calls) != 0 {
 		t.Fatalf("restarted capable provider received %d attempts for a prior refusal, want none", len(calls))
+	}
+}
+
+// The ACP driver implements Steer for every agent, but only an agent that
+// advertised the extension can take it. Without the capability AO refuses before
+// reserving a delivery, so the agent is never called and the answer is not
+// "uncertain".
+func TestSteerIsRefusedWhenTheProviderDidNotAdvertiseIt(t *testing.T) {
+	h, provider := steerHarness(t)
+	provider.setCapabilities(productionCaps())
+	ctx := context.Background()
+
+	_, err := h.svc.Steer(ctx, testSession, ports.ChatUserMessage{
+		Text: "guidance", ClientMessageID: "steer-unadvertised",
+	})
+	if !errors.Is(err, chatsvc.ErrSteerUnsupported) {
+		t.Fatalf("Steer err = %v, want ErrSteerUnsupported", err)
+	}
+
+	queued, err := h.svc.Send(ctx, testSession, ports.ChatUserMessage{
+		Text: "queued", ClientMessageID: "queued-1", Origin: domain.MessageOriginHuman,
+	})
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if _, err := h.svc.PromoteQueuedTurn(ctx, testSession, queued.ID); !errors.Is(err, chatsvc.ErrSteerUnsupported) {
+		t.Fatalf("PromoteQueuedTurn err = %v, want ErrSteerUnsupported", err)
+	}
+	if calls := provider.steers(); len(calls) != 0 {
+		t.Fatalf("provider received %d steer attempts, want none", len(calls))
 	}
 }
 
