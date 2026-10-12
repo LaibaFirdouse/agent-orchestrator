@@ -1027,23 +1027,16 @@ func TestInstallCopilotHooksReplacesLegacyPreToolUsePermissionMapping(t *testing
 // hooks, so this is a tripwire for that class of regression.
 func TestCopilotManagedHooksUseDocumentedEventNames(t *testing.T) {
 	wantEvents := map[string]string{
-		"session-start":       "sessionStart",
-		"user-prompt-submit":  "userPromptSubmitted",
-		"pre-tool-use":        "preToolUse",
-		"permission-request":  "permissionRequest",
-		"notification":        "notification",
-		"permission-resolved": "postToolUse", // also postToolUseFailure; checked below
-		"stop":                "agentStop",
+		"session-start":         "sessionStart",
+		"user-prompt-submit":    "userPromptSubmitted",
+		"pre-tool-use":          "preToolUse",
+		"permission-request":    "permissionRequest",
+		"notification":          "notification",
+		"post-tool-use":         "postToolUse",
+		"post-tool-use-failure": "postToolUseFailure",
+		"stop":                  "agentStop",
 	}
-	seenPermissionResolved := 0
 	for _, spec := range copilotManagedHooks {
-		if spec.Command == "permission-resolved" {
-			seenPermissionResolved++
-			if spec.Event != "postToolUse" && spec.Event != "postToolUseFailure" {
-				t.Fatalf("permission-resolved event = %q, want postToolUse or postToolUseFailure", spec.Event)
-			}
-			continue
-		}
 		want, ok := wantEvents[spec.Command]
 		if !ok {
 			t.Fatalf("unexpected AO sub-command %q in copilotManagedHooks", spec.Command)
@@ -1051,9 +1044,6 @@ func TestCopilotManagedHooksUseDocumentedEventNames(t *testing.T) {
 		if spec.Event != want {
 			t.Fatalf("command %q event = %q, want %q (Copilot hooks reference camelCase)", spec.Command, spec.Event, want)
 		}
-	}
-	if seenPermissionResolved != 2 {
-		t.Fatalf("permission-resolved bindings = %d, want 2 (postToolUse + postToolUseFailure)", seenPermissionResolved)
 	}
 	if len(copilotManagedHooks) != 8 {
 		t.Fatalf("copilotManagedHooks length = %d, want 8", len(copilotManagedHooks))

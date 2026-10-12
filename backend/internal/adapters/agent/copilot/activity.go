@@ -13,12 +13,19 @@ import (
 // permission or elicitation UI. permission-request is installed only so AO can
 // return {} and fall through to Copilot's native Yes/No — it carries no
 // activity signal (the hook fires before auto-allow, so treating it as
-// waiting_input would false-positive). postToolUse maps to permission-resolved
-// so a completed tool can clear waiting_input via the turn-boundary path
-// without demoting waiting_input from unrelated pre/post-tool-use traffic.
+// waiting_input would false-positive).
+//
+// postToolUse maps to ordinary post-tool-use (active), not permission-resolved:
+// the latter is a turn boundary and would clear sticky waiting_input when a
+// sibling tool finishes while a prompt is still open. The lifecycle clears
+// Copilot waiting_input when pre-tool-use follows a notification-opened
+// prompt, or on an explicit user/turn boundary (user-prompt-submit, stop).
+// Stale async permission/elicitation notifications after that clear are
+// suppressed in the lifecycle reducer, not here — this deriver only maps
+// payload shape onto a state.
 func DeriveActivityState(event string, payload []byte) (domain.ActivityState, bool) {
 	switch event {
-	case "session-start", "user-prompt-submit", "pre-tool-use", "permission-resolved":
+	case "session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "post-tool-use-failure":
 		return domain.ActivityActive, true
 	case "stop":
 		return domain.ActivityIdle, true

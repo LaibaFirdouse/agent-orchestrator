@@ -18,9 +18,9 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		if got := stateOf(st, "c1"); got != domain.ActivityActive {
 			t.Fatalf("after pre-tool-use = %q, want active (not waiting_input)", got)
 		}
-		mustApply(t, m, "c1", sig(domain.ActivityActive, "permission-resolved", "bash", ""))
+		mustApply(t, m, "c1", sig(domain.ActivityActive, "post-tool-use", "bash", ""))
 		if got := stateOf(st, "c1"); got != domain.ActivityActive {
-			t.Fatalf("after permission-resolved = %q, want active", got)
+			t.Fatalf("after post-tool-use = %q, want active", got)
 		}
 		mustApply(t, m, "c1", sig(domain.ActivityIdle, "stop", "", ""))
 		if got := stateOf(st, "c1"); got != domain.ActivityIdle {
@@ -36,14 +36,15 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		if got := stateOf(st, "c2"); got != domain.ActivityWaitingInput {
 			t.Fatalf("after permission_prompt = %q, want waiting_input", got)
 		}
-		// Still waiting while tool hooks fire before clear.
-		mustApply(t, m, "c2", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
+		// Sibling/background post must not clear while the prompt is open.
+		mustApply(t, m, "c2", sig(domain.ActivityActive, "post-tool-use", "read", "toolu_bg"))
 		if got := stateOf(st, "c2"); got != domain.ActivityWaitingInput {
-			t.Fatalf("pre-tool-use must not demote waiting_input: %q", got)
+			t.Fatalf("sibling post must not demote waiting_input: %q", got)
 		}
-		mustApply(t, m, "c2", sig(domain.ActivityActive, "permission-resolved", "bash", ""))
+		// Gated tool starting after the user answered clears waiting_input.
+		mustApply(t, m, "c2", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
 		if got := stateOf(st, "c2"); got != domain.ActivityActive {
-			t.Fatalf("after approve/post = %q, want active", got)
+			t.Fatalf("after approve/pre-tool-use = %q, want active", got)
 		}
 	})
 
@@ -58,20 +59,50 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		}
 	})
 
-	t.Run("late permission_prompt after resolve re-enters waiting_input", func(t *testing.T) {
-		// Residual race: Copilot notification hooks are async. Document current
-		// behavior so a follow-up can suppress stale prompts if needed.
+	t.Run("late permission_prompt after clear is suppressed", func(t *testing.T) {
 		m, st, _ := newManager()
 		seedSignaled(st, "c4", domain.ActivityActive)
 
 		mustApply(t, m, "c4", sig(domain.ActivityWaitingInput, "notification", "", ""))
-		mustApply(t, m, "c4", sig(domain.ActivityActive, "permission-resolved", "bash", ""))
+		mustApply(t, m, "c4", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
 		if got := stateOf(st, "c4"); got != domain.ActivityActive {
-			t.Fatalf("after resolve = %q, want active", got)
+			t.Fatalf("after clear = %q, want active", got)
 		}
 		mustApply(t, m, "c4", sig(domain.ActivityWaitingInput, "notification", "", ""))
-		if got := stateOf(st, "c4"); got != domain.ActivityWaitingInput {
-			t.Fatalf("late notification = %q, want waiting_input (known async race)", got)
+		if got := stateOf(st, "c4"); got != domain.ActivityActive {
+			t.Fatalf("late notification = %q, want active (stale suppress)", got)
+		}
+	})
+
+	t.Run("late permission_prompt after stop is suppressed", func(t *testing.T) {
+		m, st, _ := newManager()
+		seedSignaled(st, "c5", domain.ActivityActive)
+
+		mustApply(t, m, "c5", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		mustApply(t, m, "c5", sig(domain.ActivityIdle, "stop", "", ""))
+		if got := stateOf(st, "c5"); got != domain.ActivityIdle {
+			t.Fatalf("after stop = %q, want idle", got)
+		}
+		mustApply(t, m, "c5", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		if got := stateOf(st, "c5"); got != domain.ActivityIdle {
+			t.Fatalf("late notification after stop = %q, want idle", got)
+		}
+	})
+
+	t.Run("fresh user turn accepts permission notifications again", func(t *testing.T) {
+		m, st, _ := newManager()
+		seedSignaled(st, "c6", domain.ActivityActive)
+
+		mustApply(t, m, "c6", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		mustApply(t, m, "c6", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
+		mustApply(t, m, "c6", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		if got := stateOf(st, "c6"); got != domain.ActivityActive {
+			t.Fatalf("stale after clear = %q, want active", got)
+		}
+		mustApply(t, m, "c6", sig(domain.ActivityActive, "user-prompt-submit", "", ""))
+		mustApply(t, m, "c6", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		if got := stateOf(st, "c6"); got != domain.ActivityWaitingInput {
+			t.Fatalf("new-turn notification = %q, want waiting_input", got)
 		}
 	})
 }

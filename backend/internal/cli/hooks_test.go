@@ -1726,7 +1726,7 @@ func TestHooks_CopilotPermissionRequestFallsThroughWithoutActivity(t *testing.T)
 	}
 }
 
-func TestHooks_CopilotPermissionResolvedClearsViaTurnBoundaryEvent(t *testing.T) {
+func TestHooks_CopilotPostToolUseReportsActive(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "ao-7")
 	t.Setenv("AO_RUNTIME_LAUNCH_ID", "")
 	cfg := setConfigEnv(t)
@@ -1736,7 +1736,7 @@ func TestHooks_CopilotPermissionResolvedClearsViaTurnBoundaryEvent(t *testing.T)
 	_, _, err := executeCLI(t, Deps{
 		In:           strings.NewReader(`{"sessionId":"copilot-native-1","toolName":"bash"}`),
 		ProcessAlive: func(int) bool { return true },
-	}, "hooks", "copilot", "permission-resolved")
+	}, "hooks", "copilot", "post-tool-use")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1744,7 +1744,7 @@ func TestHooks_CopilotPermissionResolvedClearsViaTurnBoundaryEvent(t *testing.T)
 	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
 		t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
 	}
-	want := setActivityAPIRequest{State: "active", Event: "permission-resolved", ToolName: "bash", AgentSessionID: "copilot-native-1"}
+	want := setActivityAPIRequest{State: "active", Event: "post-tool-use", ToolName: "bash", AgentSessionID: "copilot-native-1"}
 	assertActivityRequest(t, req, want)
 }
 

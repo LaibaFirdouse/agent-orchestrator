@@ -21,7 +21,8 @@ func TestDeriveActivityState(t *testing.T) {
 		{"permission prompt notification", "notification", `{"notification_type":"permission_prompt"}`, domain.ActivityWaitingInput, true},
 		{"elicitation notification", "notification", `{"notificationType":"elicitation_dialog"}`, domain.ActivityWaitingInput, true},
 		{"other notification ignored", "notification", `{"notification_type":"agent_idle"}`, "", false},
-		{"post tool maps to permission-resolved", "permission-resolved", `{"toolName":"bash"}`, domain.ActivityActive, true},
+		{"post tool maps to post-tool-use", "post-tool-use", `{"toolName":"bash"}`, domain.ActivityActive, true},
+		{"post tool failure maps to post-tool-use-failure", "post-tool-use-failure", `{"toolName":"bash"}`, domain.ActivityActive, true},
 		{"stop", "stop", `{}`, domain.ActivityIdle, true},
 		{"unknown", "session-end", `{}`, "", false},
 	}

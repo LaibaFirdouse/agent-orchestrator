@@ -74,12 +74,16 @@ type copilotHookSpec struct {
 //
 // Activity mapping (B1 / issue #6280):
 //   - preToolUse → pre-tool-use (active): ordinary tool traffic, not approval.
+//     When a notification opened waiting_input, the lifecycle treats the next
+//     pre-tool-use as proof the user answered (gated tool is starting).
 //   - permissionRequest → permission-request: no activity; CLI writes {} so
 //     Copilot falls through to its native Yes/No (hook fires before auto-allow).
 //   - notification → notification: waiting_input only for permission_prompt /
 //     elicitation_dialog.
-//   - postToolUse / postToolUseFailure → permission-resolved (active): clears
-//     sticky waiting_input via the turn-boundary path.
+//   - postToolUse / postToolUseFailure → post-tool-use / post-tool-use-failure
+//     (active): ordinary tool completion. Must NOT be permission-resolved —
+//     that event is a turn boundary and would clear sticky waiting_input when a
+//     sibling/background tool finishes while a prompt is still open.
 //   - agentStop → stop (idle).
 var copilotManagedHooks = []copilotHookSpec{
 	{Event: "sessionStart", Command: "session-start"},
@@ -87,8 +91,8 @@ var copilotManagedHooks = []copilotHookSpec{
 	{Event: "preToolUse", Command: "pre-tool-use"},
 	{Event: "permissionRequest", Command: "permission-request"},
 	{Event: "notification", Command: "notification"},
-	{Event: "postToolUse", Command: "permission-resolved"},
-	{Event: "postToolUseFailure", Command: "permission-resolved"},
+	{Event: "postToolUse", Command: "post-tool-use"},
+	{Event: "postToolUseFailure", Command: "post-tool-use-failure"},
 	{Event: "agentStop", Command: "stop"},
 }
 
