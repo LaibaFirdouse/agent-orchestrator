@@ -313,11 +313,11 @@ type coordinatorSubmission struct {
 	message, key string
 }
 type coordinatorDelivery struct {
-	submissions     []coordinatorSubmission
-	interrupts      []domain.SessionID
-	submitErr       error
-	submitErrByKey  map[string]error
-	submitKeys      []string
+	submissions    []coordinatorSubmission
+	interrupts     []domain.SessionID
+	submitErr      error
+	submitErrByKey map[string]error
+	submitKeys     []string
 }
 
 func (d *coordinatorDelivery) Submit(_ context.Context, target domain.SessionID, message, key string) error {
