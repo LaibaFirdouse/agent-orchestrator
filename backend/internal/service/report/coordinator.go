@@ -96,7 +96,9 @@ func (c *Coordinator) Start(ctx context.Context) <-chan struct{} {
 func (c *Coordinator) run(ctx context.Context) {
 	for {
 		delay, err := c.RunDue(ctx)
-		if err != nil {
+		// Preserve a positive durable deadline from RunDue; only fall back when
+		// the cycle did not compute one (keeps deferred available_at accurate).
+		if err != nil && delay <= 0 {
 			delay = c.retryDelay
 		}
 		if delay < 0 {
@@ -121,28 +123,30 @@ func (c *Coordinator) run(ctx context.Context) {
 // RunDue performs bounded due delivery and returns the delay until the next
 // durable deadline. Tests call it directly with fake time.
 //
-// A claimed delivery failure backs the batch off the front of the schedule so
-// other due batches can run in the same cycle instead of head-of-line blocking.
+// Claimed delivery failures defer the batch by retryDelay so other due batches
+// can run in the same cycle instead of head-of-line blocking.
 func (c *Coordinator) RunDue(ctx context.Context) (time.Duration, error) {
 	if c == nil || c.store == nil || c.delivery == nil {
 		return -1, errors.New("report coordinator dependencies are required")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var lastErr error
 	for {
 		pending, err := c.store.ListPendingReportSchedule(ctx, 1)
 		if err != nil {
 			return c.retryDelay, err
 		}
 		if len(pending) == 0 {
-			return -1, nil
+			return -1, lastErr
 		}
 		now := c.now().UTC()
 		if pending[0].AvailableAt.After(now) {
-			return pending[0].AvailableAt.Sub(now), nil
+			return pending[0].AvailableAt.Sub(now), lastErr
 		}
 		head := pending[0]
 		if err := c.deliverProject(ctx, head.ProjectID); err != nil {
+			lastErr = err
 			next, listErr := c.store.ListPendingReportSchedule(ctx, 1)
 			if listErr != nil {
 				return c.retryDelay, errors.Join(err, listErr)
@@ -152,29 +156,28 @@ func (c *Coordinator) RunDue(ctx context.Context) (time.Duration, error) {
 			}
 			now = c.now().UTC()
 			if next[0].AvailableAt.After(now) {
-				// Failed batch was deferred; sleep until the next durable deadline.
-				return next[0].AvailableAt.Sub(now), nil
+				return next[0].AvailableAt.Sub(now), err
 			}
 			if next[0].ProjectID == head.ProjectID && next[0].ID == head.ID {
-				// Same due head (e.g. no orchestrator) — avoid a busy loop.
 				return c.retryDelay, err
 			}
 			continue
 		}
+		lastErr = nil
 	}
 }
 
 func (c *Coordinator) deliverProject(ctx context.Context, projectID domain.ProjectID) error {
-	target, ok, err := c.activeOrchestrator(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("project %s has no active orchestrator", projectID)
-	}
 	batch, err := c.claim(ctx, projectID)
 	if err != nil || len(batch.Reports) == 0 {
 		return err
+	}
+	target, ok, err := c.activeOrchestrator(ctx, projectID)
+	if err != nil {
+		return c.releaseWithBackoff(ctx, batch, err)
+	}
+	if !ok {
+		return c.releaseWithBackoff(ctx, batch, fmt.Errorf("project %s has no active orchestrator", projectID))
 	}
 	if batch.hasState(domain.ReportStuck) {
 		interrupted := false
