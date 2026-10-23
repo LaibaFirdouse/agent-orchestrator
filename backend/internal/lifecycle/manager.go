@@ -1509,10 +1509,8 @@ func (m *Manager) noteCopilotNotifySuppressAfterStopLocked(id domain.SessionID, 
 	case "stop", "session-end", "process-exited", "chat.controller.stopped", "permission-resolved":
 		m.markCopilotSuppressNotifyAfterStopLocked(id)
 	case "user-prompt-submit":
-		if cur.NeedsInput() {
-			m.markCopilotSuppressNotifyAfterStopLocked(id)
-			return
-		}
+		// A real user prompt opens a fresh turn; do not leave stop-style
+		// notification suppress from an earlier elicitation/permission clear.
 		delete(m.copilotSuppressNotifyAfterStop, id)
 	}
 }

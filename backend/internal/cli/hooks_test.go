@@ -807,6 +807,16 @@ func TestHookConversationFactsCorrelatesAcceptedReportDelivery(t *testing.T) {
 	}
 }
 
+func TestHookConversationFactsCorrelatesSessionSendDelivery(t *testing.T) {
+	prompt := domain.WrapSessionDelivery("session-send:abc-123", "Address the review on PR #6427.")
+	payload := []byte(`{"prompt":` + mustJSONString(t, prompt) + `,"prompt_id":"native-turn"}`)
+	got := hookConversationFacts(domain.HarnessClaudeCode, "user-prompt-submit", payload)
+	if got.CheckpointOrigin != domain.ConversationCheckpointOriginCoordination ||
+		got.CoordinationID != "session-send:abc-123" || got.LatestUserPrompt != "" {
+		t.Fatalf("conversation facts = %+v", got)
+	}
+}
+
 func TestHooks_SubagentStopCannotReportMainConversationCheckpoint(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "ao-7")
 	t.Setenv("AO_RUNTIME_LAUNCH_ID", "launch-3")

@@ -126,6 +126,19 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		}
 	})
 
+	t.Run("elicitation answer then permission prompt is accepted", func(t *testing.T) {
+		m, st, _ := newManager()
+		seedSignaled(st, "c3b", domain.ActivityActive)
+
+		mustApply(t, m, "c3b", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		mustApply(t, m, "c3b", sig(domain.ActivityActive, "user-prompt-submit", "", ""))
+		mustApply(t, m, "c3b", sigMeta("permission-request", "bash", ""))
+		mustApply(t, m, "c3b", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		if got := stateOf(st, "c3b"); got != domain.ActivityWaitingInput {
+			t.Fatalf("permission after elicitation = %q, want waiting_input", got)
+		}
+	})
+
 	t.Run("late permission_prompt before gated post is suppressed", func(t *testing.T) {
 		m, st, _ := newManager()
 		seedSignaled(st, "c4", domain.ActivityActive)
