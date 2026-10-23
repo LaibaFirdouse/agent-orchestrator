@@ -52,6 +52,23 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		}
 	})
 
+	t.Run("id-less copilot payloads complete permission cycle", func(t *testing.T) {
+		m, st, _ := newManager()
+		seedSignaled(st, "c2c", domain.ActivityActive)
+
+		mustApply(t, m, "c2c", sigMeta("permission-request", "bash", ""))
+		mustApply(t, m, "c2c", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		mustApply(t, m, "c2c", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
+		mustApply(t, m, "c2c", sig(domain.ActivityActive, "post-tool-use", "bash", ""))
+		if got := stateOf(st, "c2c"); got != domain.ActivityActive {
+			t.Fatalf("after id-less post = %q, want active", got)
+		}
+		mustApply(t, m, "c2c", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		if got := stateOf(st, "c2c"); got != domain.ActivityActive {
+			t.Fatalf("late notification after id-less completion = %q, want active", got)
+		}
+	})
+
 	t.Run("permission prompt then approve then clear", func(t *testing.T) {
 		m, st, _ := newManager()
 		seedSignaled(st, "c2", domain.ActivityActive)

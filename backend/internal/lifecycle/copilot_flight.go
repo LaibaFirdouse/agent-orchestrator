@@ -58,7 +58,13 @@ func copilotPreToolUseClearsPermission(f *toolFlight, s ports.ActivitySignal) bo
 		return false
 	}
 	if f.copilotClearCandidate != "" {
-		return s.ToolUseID != "" && s.ToolUseID == f.copilotClearCandidate
+		if s.ToolUseID != "" {
+			return s.ToolUseID == f.copilotClearCandidate
+		}
+		if f.copilotPromptToolName != "" && strings.EqualFold(s.ToolName, f.copilotPromptToolName) {
+			return !copilotSameNameInflightAmbiguous(f, s.ToolName)
+		}
+		return false
 	}
 	if f.copilotPromptToolName == "" {
 		return false
@@ -69,14 +75,42 @@ func copilotPreToolUseClearsPermission(f *toolFlight, s ports.ActivitySignal) bo
 	return !copilotSameNameInflightAmbiguous(f, s.ToolName)
 }
 
-func copilotAwaitPostToolUseID(f *toolFlight, s ports.ActivitySignal) string {
-	if s.ToolUseID != "" {
-		return s.ToolUseID
+func copilotBeginAwaitPost(f *toolFlight, s ports.ActivitySignal) {
+	if f == nil {
+		return
 	}
-	if f.copilotClearCandidate != "" {
-		return f.copilotClearCandidate
+	f.copilotAwaitPostToolUseID = s.ToolUseID
+	if f.copilotAwaitPostToolUseID == "" {
+		f.copilotAwaitPostToolUseID = f.copilotClearCandidate
 	}
-	return ""
+	if f.copilotAwaitPostToolUseID != "" {
+		f.copilotAwaitPostToolName = ""
+		return
+	}
+	f.copilotAwaitPostToolName = s.ToolName
+	if f.copilotAwaitPostToolName == "" {
+		f.copilotAwaitPostToolName = f.copilotPromptToolName
+	}
+}
+
+func copilotPostCompletesAwait(f *toolFlight, s ports.ActivitySignal) bool {
+	if f == nil {
+		return false
+	}
+	if f.copilotAwaitPostToolUseID != "" && s.ToolUseID != "" {
+		return s.ToolUseID == f.copilotAwaitPostToolUseID
+	}
+	if f.copilotAwaitPostToolName != "" && s.ToolName != "" {
+		return strings.EqualFold(s.ToolName, f.copilotAwaitPostToolName)
+	}
+	return false
+}
+
+func copilotAwaitingPostCompletion(f *toolFlight) bool {
+	if f == nil {
+		return false
+	}
+	return f.copilotAwaitPostToolUseID != "" || f.copilotAwaitPostToolName != ""
 }
 
 func copilotShouldSuppressPermissionNotification(
@@ -93,7 +127,7 @@ func copilotShouldSuppressPermissionNotification(
 	if cur == domain.ActivityWaitingInput {
 		return false
 	}
-	if fl.copilotAwaitPostToolUseID != "" {
+	if copilotAwaitingPostCompletion(fl) {
 		return true
 	}
 	// Strict: after a prompt fully completes (through post), drop async

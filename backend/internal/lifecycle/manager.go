@@ -1209,9 +1209,11 @@ type toolFlight struct {
 	copilotPendingClearCandidate string
 	copilotPermReqSeq      uint64
 	copilotConsumedPermReqSeq uint64
-	// copilotAwaitPostToolUseID holds the gated tool until its post-tool-use
-	// completes so async notification duplicates can be dropped safely.
-	copilotAwaitPostToolUseID string
+	// copilotAwaitPostToolUseID / copilotAwaitPostToolName hold the gated tool
+	// until its post-tool-use completes. Copilot payloads often carry toolName
+	// only (no toolUseId).
+	copilotAwaitPostToolUseID   string
+	copilotAwaitPostToolName    string
 }
 
 func cloneToolFlight(flight *toolFlight) *toolFlight {
@@ -1231,6 +1233,7 @@ func cloneToolFlight(flight *toolFlight) *toolFlight {
 		copilotPermReqSeq:            flight.copilotPermReqSeq,
 		copilotConsumedPermReqSeq: flight.copilotConsumedPermReqSeq,
 		copilotAwaitPostToolUseID: flight.copilotAwaitPostToolUseID,
+		copilotAwaitPostToolName:  flight.copilotAwaitPostToolName,
 	}
 	for id, name := range flight.inflight {
 		clone.inflight[id] = name
@@ -1341,10 +1344,13 @@ func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.Acti
 		}
 	case "post-tool-use", "post-tool-use-failure", "post-tool-use-fail":
 		if fl != nil {
-			delete(fl.inflight, s.ToolUseID)
-			if fl.copilotAwaitPostToolUseID != "" && s.ToolUseID == fl.copilotAwaitPostToolUseID {
+			if s.ToolUseID != "" {
+				delete(fl.inflight, s.ToolUseID)
+			}
+			if copilotPostCompletesAwait(fl, s) {
 				fl.copilotConsumedPermReqSeq = fl.copilotPermReqSeq
 				fl.copilotAwaitPostToolUseID = ""
+				fl.copilotAwaitPostToolName = ""
 			}
 		}
 	}
@@ -1459,7 +1465,7 @@ func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.Acti
 			return suppressed
 		}
 		fl.copilotPermissionWaiting = false
-		fl.copilotAwaitPostToolUseID = copilotAwaitPostToolUseID(fl, s)
+		copilotBeginAwaitPost(fl, s)
 		return s
 
 	case cur.IsSticky() && isToolUseEvent(s.Event):
