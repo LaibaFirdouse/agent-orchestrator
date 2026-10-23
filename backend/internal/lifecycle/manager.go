@@ -267,13 +267,10 @@ type Manager struct {
 	// flights tracks, per session, the in-flight tool executions and the
 	// pending permission dialog's identity (see toolFlight). Guarded by mu.
 	flights map[domain.SessionID]*toolFlight
-	// suppressPermissionNotify drops stale Copilot permission_prompt /
-	// elicitation_dialog notifications after the prompt was answered or the
-	// turn ended. Copilot's notification hook is async and can arrive after
-	// the clear path (or agentStop); without this, waiting_input re-enters
-	// with nothing left to clear it. Cleared on the next user-prompt-submit
-	// while not already needing input (fresh user turn). Guarded by mu.
-	suppressPermissionNotify map[domain.SessionID]struct{}
+	// copilotSuppressNotifyAfterStop drops stale Copilot permission notifications
+	// that arrive after agentStop/end cleared the in-memory flight map. Guarded
+	// by mu. Cleared on user-prompt-submit that starts a fresh turn.
+	copilotSuppressNotifyAfterStop map[domain.SessionID]struct{}
 	// steps is each session's recent tool calls for the memory window, from
 	// tool-use hooks (see steps.go). Guarded by mu.
 	steps map[domain.SessionID][]domain.SessionStep
@@ -310,7 +307,7 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 		clock:                       clock,
 		react:                       newReactionState(),
 		flights:                     map[domain.SessionID]*toolFlight{},
-		suppressPermissionNotify:    map[domain.SessionID]struct{}{},
+		copilotSuppressNotifyAfterStop: map[domain.SessionID]struct{}{},
 		steps:                       map[domain.SessionID][]domain.SessionStep{},
 		pendingLaunches:             map[domain.SessionID]pendingLaunch{},
 		steerActive:                 func(domain.AgentHarness) bool { return false },
@@ -620,7 +617,8 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 			}
 		}
 	}
-	if !s.Valid && s.SubagentID == "" && s.AgentSessionID == "" && s.LatestUserPrompt == "" && s.LatestAssistantUpdate == "" && s.TranscriptPath == "" {
+	if !s.Valid && s.SubagentID == "" && s.AgentSessionID == "" && s.LatestUserPrompt == "" && s.LatestAssistantUpdate == "" && s.TranscriptPath == "" &&
+		s.Event != "permission-request" {
 		return nil
 	}
 	if s.LaunchID != "" {
@@ -934,7 +932,10 @@ retryProjection:
 		(s.TranscriptPath != "" && rec.Metadata.NativeTranscriptPath != s.TranscriptPath) ||
 		checkpointChanged || subagentFacts != storedSubagentFacts
 	toolFlightBeforeProjection := cloneToolFlight(m.flights[id])
-	_, hadSuppressBeforeProjection := m.suppressPermissionNotify[id]
+	_, hadSuppressBeforeProjection := m.copilotSuppressNotifyAfterStop[id]
+	if s.Event == "permission-request" {
+		m.recordCopilotPermissionRequestLocked(id, rec.Activity.State, s)
+	}
 	if s.Valid {
 		s = m.applyToolPrecedenceLocked(id, rec.Activity.State, s)
 	}
@@ -953,7 +954,7 @@ retryProjection:
 			return applied, false, err
 		}
 		m.restoreToolFlightLocked(id, toolFlightBeforeProjection)
-		m.restoreSuppressPermissionNotifyLocked(id, hadSuppressBeforeProjection)
+		m.restoreCopilotSuppressNotifyAfterStopLocked(id, hadSuppressBeforeProjection)
 		m.restoreStepsLocked(id, stepsBeforeProjection)
 		if err != nil {
 			return false, false, err
@@ -1194,12 +1195,19 @@ type toolFlight struct {
 	// after-execution event can clear only its own key, and the session remains
 	// blocked until every observed dialog has completed.
 	cursorPending map[string]int
-	// copilotPermissionPrompt is set when a Copilot notification entered
-	// waiting_input for a permission_prompt / elicitation_dialog. The next
-	// pre-tool-use may then clear sticky waiting_input (gated tool starting
-	// after the user answered). Ordinary waiting_input without this flag
-	// still ignores tool-use traffic.
-	copilotPermissionPrompt bool
+	// copilotPermissionWaiting is set when a Copilot notification entered
+	// waiting_input for permission_prompt / elicitation_dialog.
+	copilotPermissionWaiting bool
+	// copilotPromptToolName and copilotClearCandidate come from the next
+	// permission-request while waiting (observe-only hook); pre-tool-use must
+	// correlate before clearing waiting_input.
+	copilotPromptToolName  string
+	copilotClearCandidate  string
+	copilotPermReqSeq      uint64
+	copilotConsumedPermReqSeq uint64
+	// copilotAwaitPostToolUseID holds the gated tool until its post-tool-use
+	// completes so async notification duplicates can be dropped safely.
+	copilotAwaitPostToolUseID string
 }
 
 func cloneToolFlight(flight *toolFlight) *toolFlight {
@@ -1207,10 +1215,15 @@ func cloneToolFlight(flight *toolFlight) *toolFlight {
 		return nil
 	}
 	clone := &toolFlight{
-		inflight:                make(map[string]string, len(flight.inflight)),
-		blockedCandidate:        flight.blockedCandidate,
-		cursorPending:           make(map[string]int, len(flight.cursorPending)),
-		copilotPermissionPrompt: flight.copilotPermissionPrompt,
+		inflight:                  make(map[string]string, len(flight.inflight)),
+		blockedCandidate:          flight.blockedCandidate,
+		cursorPending:             make(map[string]int, len(flight.cursorPending)),
+		copilotPermissionWaiting:  flight.copilotPermissionWaiting,
+		copilotPromptToolName:     flight.copilotPromptToolName,
+		copilotClearCandidate:     flight.copilotClearCandidate,
+		copilotPermReqSeq:         flight.copilotPermReqSeq,
+		copilotConsumedPermReqSeq: flight.copilotConsumedPermReqSeq,
+		copilotAwaitPostToolUseID: flight.copilotAwaitPostToolUseID,
 	}
 	for id, name := range flight.inflight {
 		clone.inflight[id] = name
@@ -1322,14 +1335,19 @@ func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.Acti
 	case "post-tool-use", "post-tool-use-failure", "post-tool-use-fail":
 		if fl != nil {
 			delete(fl.inflight, s.ToolUseID)
+			if fl.copilotAwaitPostToolUseID != "" && s.ToolUseID == fl.copilotAwaitPostToolUseID {
+				fl.copilotConsumedPermReqSeq = fl.copilotPermReqSeq
+				fl.copilotAwaitPostToolUseID = ""
+			}
 		}
 	}
 
-	// Copilot notification hooks are async: a permission_prompt /
-	// elicitation_dialog can arrive after the prompt was answered or the turn
-	// ended. Drop those so waiting_input does not re-enter with no clear path.
+	// Copilot notification hooks are async: drop stale duplicates while the
+	// gated tool is still starting or after a completed permission cycle until
+	// a fresh permission-request arrives.
 	if s.Event == "notification" && s.State.NeedsInput() {
-		if _, ok := m.suppressPermissionNotify[id]; ok {
+		_, afterStop := m.copilotSuppressNotifyAfterStop[id]
+		if copilotShouldSuppressPermissionNotification(cur, fl, afterStop) {
 			return suppressed
 		}
 	}
@@ -1398,7 +1416,7 @@ func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.Acti
 		switch {
 		case isTurnBoundaryEvent(s.Event):
 			delete(m.flights, id)
-			m.notePermissionNotifySuppressLocked(id, cur, s.Event)
+			m.noteCopilotNotifySuppressAfterStopLocked(id, cur, s.Event)
 			return s
 		default:
 			if fl != nil {
@@ -1429,12 +1447,12 @@ func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.Acti
 			return suppressed
 		}
 
-	case cur == domain.ActivityWaitingInput && s.Event == "pre-tool-use" && fl != nil && fl.copilotPermissionPrompt:
-		// Copilot: a notification opened waiting_input; the gated tool is now
-		// starting, so the user answered. Ordinary waiting_input without this
-		// flag still ignores tool-use traffic below.
-		fl.copilotPermissionPrompt = false
-		m.markSuppressPermissionNotifyLocked(id)
+	case cur == domain.ActivityWaitingInput && s.Event == "pre-tool-use" && fl != nil && fl.copilotPermissionWaiting:
+		if !copilotPreToolUseClearsPermission(fl, s) {
+			return suppressed
+		}
+		fl.copilotPermissionWaiting = false
+		fl.copilotAwaitPostToolUseID = copilotAwaitPostToolUseID(fl, s)
 		return s
 
 	case cur.IsSticky() && isToolUseEvent(s.Event):
@@ -1444,45 +1462,46 @@ func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.Acti
 
 	default:
 		if s.Event == "notification" && s.State == domain.ActivityWaitingInput {
-			ensure().copilotPermissionPrompt = true
+			f := ensure()
+			f.copilotPermissionWaiting = true
+			f.copilotPromptToolName = ""
+			f.copilotClearCandidate = ""
 		}
 		if isTurnBoundaryEvent(s.Event) {
 			delete(m.flights, id)
-			m.notePermissionNotifySuppressLocked(id, cur, s.Event)
+			m.noteCopilotNotifySuppressAfterStopLocked(id, cur, s.Event)
 		}
 		return s
 	}
 }
 
-func (m *Manager) markSuppressPermissionNotifyLocked(id domain.SessionID) {
-	if m.suppressPermissionNotify == nil {
-		m.suppressPermissionNotify = map[domain.SessionID]struct{}{}
+func (m *Manager) markCopilotSuppressNotifyAfterStopLocked(id domain.SessionID) {
+	if m.copilotSuppressNotifyAfterStop == nil {
+		m.copilotSuppressNotifyAfterStop = map[domain.SessionID]struct{}{}
 	}
-	m.suppressPermissionNotify[id] = struct{}{}
+	m.copilotSuppressNotifyAfterStop[id] = struct{}{}
 }
 
-func (m *Manager) restoreSuppressPermissionNotifyLocked(id domain.SessionID, had bool) {
+func (m *Manager) restoreCopilotSuppressNotifyAfterStopLocked(id domain.SessionID, had bool) {
 	if had {
-		m.markSuppressPermissionNotifyLocked(id)
+		m.markCopilotSuppressNotifyAfterStopLocked(id)
 		return
 	}
-	delete(m.suppressPermissionNotify, id)
+	delete(m.copilotSuppressNotifyAfterStop, id)
 }
 
-// notePermissionNotifySuppressLocked updates stale-notification suppression at
-// turn boundaries. Stop/end always suppress; user-prompt-submit suppresses when
-// it clears a needs-input pause and otherwise opens a fresh turn that accepts
-// new permission notifications again.
-func (m *Manager) notePermissionNotifySuppressLocked(id domain.SessionID, cur domain.ActivityState, event string) {
+// noteCopilotNotifySuppressAfterStopLocked retains stale-notification guard
+// facts across turn boundaries that wipe the in-memory flight map.
+func (m *Manager) noteCopilotNotifySuppressAfterStopLocked(id domain.SessionID, cur domain.ActivityState, event string) {
 	switch event {
 	case "stop", "session-end", "process-exited", "chat.controller.stopped", "permission-resolved":
-		m.markSuppressPermissionNotifyLocked(id)
+		m.markCopilotSuppressNotifyAfterStopLocked(id)
 	case "user-prompt-submit":
 		if cur.NeedsInput() {
-			m.markSuppressPermissionNotifyLocked(id)
+			m.markCopilotSuppressNotifyAfterStopLocked(id)
 			return
 		}
-		delete(m.suppressPermissionNotify, id)
+		delete(m.copilotSuppressNotifyAfterStop, id)
 	}
 }
 

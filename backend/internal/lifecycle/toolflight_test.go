@@ -294,16 +294,22 @@ func TestToolPrecedence_DefinitivePermissionResolutionClearsBlocked(t *testing.T
 
 func TestToolPrecedence_CopilotNotificationPreToolUseClearsWaitingInput(t *testing.T) {
 	// Copilot B1 (#6280): notification opens waiting_input; the gated tool's
-	// pre-tool-use clears it. Ordinary post-tool-use must not (sibling race).
+	// pre-tool-use clears it after permission-request identity. Sibling pre/post
+	// must not demote waiting_input.
 	m, st, _ := newManager()
 	seedSignaled(st, "mer-1", domain.ActivityActive)
 
 	mustApply(t, m, "mer-1", sig(domain.ActivityWaitingInput, "notification", "", ""))
-	mustApply(t, m, "mer-1", sig(domain.ActivityActive, "post-tool-use", "bash", "toolu_sibling"))
+	mustApply(t, m, "mer-1", sigMeta("permission-request", "bash", ""))
+	mustApply(t, m, "mer-1", sig(domain.ActivityActive, "post-tool-use", "read", "toolu_sibling"))
 	if got := stateOf(st, "mer-1"); got != domain.ActivityWaitingInput {
 		t.Fatalf("state after sibling post = %q, want waiting_input", got)
 	}
-	mustApply(t, m, "mer-1", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
+	mustApply(t, m, "mer-1", sig(domain.ActivityActive, "pre-tool-use", "read", "toolu_sibling"))
+	if got := stateOf(st, "mer-1"); got != domain.ActivityWaitingInput {
+		t.Fatalf("state after sibling pre = %q, want waiting_input", got)
+	}
+	mustApply(t, m, "mer-1", sig(domain.ActivityActive, "pre-tool-use", "bash", "toolu_bash"))
 	if got := stateOf(st, "mer-1"); got != domain.ActivityActive {
 		t.Fatalf("state after gated pre-tool-use = %q, want active", got)
 	}

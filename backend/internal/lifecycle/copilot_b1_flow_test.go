@@ -4,7 +4,12 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
+
+func sigMeta(event, toolName, toolUseID string) ports.ActivitySignal {
+	return ports.ActivitySignal{Valid: false, Event: event, ToolName: toolName, ToolUseID: toolUseID}
+}
 
 // End-to-end Copilot B1 (#6280) activity sequence through the lifecycle reducer.
 func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
@@ -33,18 +38,39 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		seedSignaled(st, "c2", domain.ActivityActive)
 
 		mustApply(t, m, "c2", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		mustApply(t, m, "c2", sigMeta("permission-request", "bash", ""))
 		if got := stateOf(st, "c2"); got != domain.ActivityWaitingInput {
 			t.Fatalf("after permission_prompt = %q, want waiting_input", got)
 		}
-		// Sibling/background post must not clear while the prompt is open.
 		mustApply(t, m, "c2", sig(domain.ActivityActive, "post-tool-use", "read", "toolu_bg"))
 		if got := stateOf(st, "c2"); got != domain.ActivityWaitingInput {
 			t.Fatalf("sibling post must not demote waiting_input: %q", got)
 		}
-		// Gated tool starting after the user answered clears waiting_input.
-		mustApply(t, m, "c2", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
+		mustApply(t, m, "c2", sig(domain.ActivityActive, "pre-tool-use", "read", "toolu_bg"))
+		if got := stateOf(st, "c2"); got != domain.ActivityWaitingInput {
+			t.Fatalf("sibling pre must not demote waiting_input: %q", got)
+		}
+		mustApply(t, m, "c2", sig(domain.ActivityActive, "pre-tool-use", "bash", "toolu_bash"))
 		if got := stateOf(st, "c2"); got != domain.ActivityActive {
 			t.Fatalf("after approve/pre-tool-use = %q, want active", got)
+		}
+	})
+
+	t.Run("two sequential approvals in one turn", func(t *testing.T) {
+		m, st, _ := newManager()
+		seedSignaled(st, "c2b", domain.ActivityActive)
+
+		mustApply(t, m, "c2b", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		mustApply(t, m, "c2b", sigMeta("permission-request", "bash", ""))
+		mustApply(t, m, "c2b", sig(domain.ActivityActive, "pre-tool-use", "bash", "toolu_bash"))
+		mustApply(t, m, "c2b", sig(domain.ActivityActive, "post-tool-use", "bash", "toolu_bash"))
+		if got := stateOf(st, "c2b"); got != domain.ActivityActive {
+			t.Fatalf("after first post = %q, want active", got)
+		}
+		mustApply(t, m, "c2b", sigMeta("permission-request", "node", ""))
+		mustApply(t, m, "c2b", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		if got := stateOf(st, "c2b"); got != domain.ActivityWaitingInput {
+			t.Fatalf("second approval = %q, want waiting_input", got)
 		}
 	})
 
@@ -59,18 +85,33 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		}
 	})
 
-	t.Run("late permission_prompt after clear is suppressed", func(t *testing.T) {
+	t.Run("late permission_prompt before gated post is suppressed", func(t *testing.T) {
 		m, st, _ := newManager()
 		seedSignaled(st, "c4", domain.ActivityActive)
 
 		mustApply(t, m, "c4", sig(domain.ActivityWaitingInput, "notification", "", ""))
-		mustApply(t, m, "c4", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
+		mustApply(t, m, "c4", sigMeta("permission-request", "bash", ""))
+		mustApply(t, m, "c4", sig(domain.ActivityActive, "pre-tool-use", "bash", "toolu_bash"))
 		if got := stateOf(st, "c4"); got != domain.ActivityActive {
 			t.Fatalf("after clear = %q, want active", got)
 		}
 		mustApply(t, m, "c4", sig(domain.ActivityWaitingInput, "notification", "", ""))
 		if got := stateOf(st, "c4"); got != domain.ActivityActive {
-			t.Fatalf("late notification = %q, want active (stale suppress)", got)
+			t.Fatalf("late notification before post = %q, want active (await post)", got)
+		}
+	})
+
+	t.Run("late permission_prompt after gated post is suppressed", func(t *testing.T) {
+		m, st, _ := newManager()
+		seedSignaled(st, "c4b", domain.ActivityActive)
+
+		mustApply(t, m, "c4b", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		mustApply(t, m, "c4b", sigMeta("permission-request", "bash", ""))
+		mustApply(t, m, "c4b", sig(domain.ActivityActive, "pre-tool-use", "bash", "toolu_bash"))
+		mustApply(t, m, "c4b", sig(domain.ActivityActive, "post-tool-use", "bash", "toolu_bash"))
+		mustApply(t, m, "c4b", sig(domain.ActivityWaitingInput, "notification", "", ""))
+		if got := stateOf(st, "c4b"); got != domain.ActivityActive {
+			t.Fatalf("late notification after post = %q, want active (strict stale)", got)
 		}
 	})
 
@@ -86,23 +127,6 @@ func TestCopilotB1_CompleteActivityFlows(t *testing.T) {
 		mustApply(t, m, "c5", sig(domain.ActivityWaitingInput, "notification", "", ""))
 		if got := stateOf(st, "c5"); got != domain.ActivityIdle {
 			t.Fatalf("late notification after stop = %q, want idle", got)
-		}
-	})
-
-	t.Run("fresh user turn accepts permission notifications again", func(t *testing.T) {
-		m, st, _ := newManager()
-		seedSignaled(st, "c6", domain.ActivityActive)
-
-		mustApply(t, m, "c6", sig(domain.ActivityWaitingInput, "notification", "", ""))
-		mustApply(t, m, "c6", sig(domain.ActivityActive, "pre-tool-use", "bash", ""))
-		mustApply(t, m, "c6", sig(domain.ActivityWaitingInput, "notification", "", ""))
-		if got := stateOf(st, "c6"); got != domain.ActivityActive {
-			t.Fatalf("stale after clear = %q, want active", got)
-		}
-		mustApply(t, m, "c6", sig(domain.ActivityActive, "user-prompt-submit", "", ""))
-		mustApply(t, m, "c6", sig(domain.ActivityWaitingInput, "notification", "", ""))
-		if got := stateOf(st, "c6"); got != domain.ActivityWaitingInput {
-			t.Fatalf("new-turn notification = %q, want waiting_input", got)
 		}
 	})
 }
