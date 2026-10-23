@@ -104,6 +104,19 @@ func copilotShouldSuppressPermissionNotification(
 	return false
 }
 
+func copilotPromotePendingPermissionIdentity(f *toolFlight) {
+	if f == nil {
+		return
+	}
+	if f.copilotPendingPromptToolName != "" && f.copilotPendingPermReqSeq == f.copilotPermReqSeq {
+		f.copilotPromptToolName = f.copilotPendingPromptToolName
+		f.copilotClearCandidate = f.copilotPendingClearCandidate
+	}
+	f.copilotPendingPermReqSeq = 0
+	f.copilotPendingPromptToolName = ""
+	f.copilotPendingClearCandidate = ""
+}
+
 func (m *Manager) recordCopilotPermissionRequestLocked(id domain.SessionID, cur domain.ActivityState, s ports.ActivitySignal) {
 	if s.Event != "permission-request" {
 		return
@@ -114,8 +127,15 @@ func (m *Manager) recordCopilotPermissionRequestLocked(id domain.SessionID, cur 
 		m.flights[id] = fl
 	}
 	fl.copilotPermReqSeq++
+	candidate := copilotBlockedCandidateFromInflight(fl, s.ToolName, s.ToolUseID)
 	if cur == domain.ActivityWaitingInput && fl.copilotPermissionWaiting {
 		fl.copilotPromptToolName = s.ToolName
-		fl.copilotClearCandidate = copilotBlockedCandidateFromInflight(fl, s.ToolName, s.ToolUseID)
+		fl.copilotClearCandidate = candidate
+		return
+	}
+	if cur != domain.ActivityWaitingInput {
+		fl.copilotPendingPermReqSeq = fl.copilotPermReqSeq
+		fl.copilotPendingPromptToolName = s.ToolName
+		fl.copilotPendingClearCandidate = candidate
 	}
 }

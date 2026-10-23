@@ -1198,11 +1198,15 @@ type toolFlight struct {
 	// copilotPermissionWaiting is set when a Copilot notification entered
 	// waiting_input for permission_prompt / elicitation_dialog.
 	copilotPermissionWaiting bool
-	// copilotPromptToolName and copilotClearCandidate come from the next
-	// permission-request while waiting (observe-only hook); pre-tool-use must
-	// correlate before clearing waiting_input.
+	// copilotPromptToolName and copilotClearCandidate come from permission-request
+	// (observe-only hook), including when it precedes the async notification.
 	copilotPromptToolName  string
 	copilotClearCandidate  string
+	// copilotPending* holds permission identity from permission-request while
+	// still Active; Copilot's hook order emits request before notification.
+	copilotPendingPermReqSeq   uint64
+	copilotPendingPromptToolName string
+	copilotPendingClearCandidate string
 	copilotPermReqSeq      uint64
 	copilotConsumedPermReqSeq uint64
 	// copilotAwaitPostToolUseID holds the gated tool until its post-tool-use
@@ -1219,9 +1223,12 @@ func cloneToolFlight(flight *toolFlight) *toolFlight {
 		blockedCandidate:          flight.blockedCandidate,
 		cursorPending:             make(map[string]int, len(flight.cursorPending)),
 		copilotPermissionWaiting:  flight.copilotPermissionWaiting,
-		copilotPromptToolName:     flight.copilotPromptToolName,
-		copilotClearCandidate:     flight.copilotClearCandidate,
-		copilotPermReqSeq:         flight.copilotPermReqSeq,
+		copilotPromptToolName:        flight.copilotPromptToolName,
+		copilotClearCandidate:        flight.copilotClearCandidate,
+		copilotPendingPermReqSeq:     flight.copilotPendingPermReqSeq,
+		copilotPendingPromptToolName: flight.copilotPendingPromptToolName,
+		copilotPendingClearCandidate: flight.copilotPendingClearCandidate,
+		copilotPermReqSeq:            flight.copilotPermReqSeq,
 		copilotConsumedPermReqSeq: flight.copilotConsumedPermReqSeq,
 		copilotAwaitPostToolUseID: flight.copilotAwaitPostToolUseID,
 	}
@@ -1464,8 +1471,7 @@ func (m *Manager) applyToolPrecedenceLocked(id domain.SessionID, cur domain.Acti
 		if s.Event == "notification" && s.State == domain.ActivityWaitingInput {
 			f := ensure()
 			f.copilotPermissionWaiting = true
-			f.copilotPromptToolName = ""
-			f.copilotClearCandidate = ""
+			copilotPromotePendingPermissionIdentity(f)
 		}
 		if isTurnBoundaryEvent(s.Event) {
 			delete(m.flights, id)
